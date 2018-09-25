@@ -1,0 +1,140 @@
+<?php
+/**
+ * scan_xss 处理&防止XSS攻击
+ * @param $val
+ * @return mixed|string
+ */
+function scan_xss($val)
+{
+    $val = object_to_array($val);
+    if (is_array($val)) {
+        foreach ($val as $k => $v) {
+            $val[$k] = scan_xss($v);
+        }
+        return $val;
+    }
+    $val = trim($val);
+    $val = strip_tags($val);
+    $val = htmlspecialchars($val, ENT_QUOTES);
+
+    // url 编码特殊字符
+    $val = preg_replace('/\%[0-9a-f][0-9a-f]/', '', $val);
+
+    // Js Unicode 特殊字符编码
+    $val = preg_replace('/\\\u[02aAfF][0127CcFf][0-9a-fA-F][0-9a-fA-F]/', '', $val);
+
+    // js 八进制过滤
+    $val = preg_replace('/\\\d{3}/', '', $val);
+
+    // base64 特殊字符编码过滤
+    $isMatched = preg_match('/={1,2}$/', $val);
+    if (($val == base64_encode(base64_decode($val))) && ($isMatched === 1)) {
+        $val = base64_decode($val);
+        $val = preg_replace('/[~!#$%\^\+\*&?\/|:\.<>{}\\\()\';="]/', '', $val);
+        $val = base64_encode($val);
+    }
+
+    // remove all non-printable characters. CR(0a) and LF(0b) and TAB(9) are allowed
+    // this prevents some character re-spacing such as <java\0script>
+    // note that you have to handle splits with \n, \r, and \t later since they *are* allowed in some inputs
+    $val = preg_replace('/([\x00-\x08][\x0b-\x0c][\x0e-\x20])/', '', $val);
+    //$val = addslashes($val);//防止unicode跨站脚本攻击
+    // straight replacements, the user should never need these since they're normal characters
+    // this prevents like <IMG SRC=&#X40&#X61&#X76&#X61&#X73&#X63&#X72&#X69&#X70&#X74&#X3A&#X61&#X6C&#X65&#X72&#X74&#X28&#X27&#X58&#X53&#X53&#X27&#X29>
+    $search = 'abcdefghijklmnopqrstuvwxyz';
+    $search .= 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    $search .= '1234567890!@#$%^&*()';
+    $search .= '~`";:?+/={}[]-_|\'\\';
+
+    for ($i = 0; $i < strlen($search); $i++) {
+        // ;? matches the ;, which is optional
+        // 0{0,7} matches any padded zeros, which are optional and go up to 8 chars
+
+        // &#x0040 @ search for the hex values
+        $val = preg_replace('/(&#[x|X]0{0,8}' . dechex(ord($search[$i])) . ';?)/i', $search[$i], $val); // with a ;
+        // &# @ 0{0,7} matches '0' zero to seven times
+        $val = preg_replace('/(&#0{0,8}' . ord($search[$i]) . ';?)/', $search[$i], $val); // with a ;
+    }
+
+    // now the only remaining whitespace attacks are \t, \n, and \r
+    $ra1 = array('alert', 'javascript', 'vbscript', 'expression', 'applet', 'meta', 'xml', 'blink', 'link', 'style', 'script', 'embed', 'object', 'iframe', 'frame', 'frameset', 'ilayer', 'layer', 'bgsound', 'title', 'base');
+    $ra2 = array('onabort', 'onactivate', 'onafterprint', 'onafterupdate', 'onbeforeactivate', 'onbeforecopy', 'onbeforecut', 'onbeforedeactivate', 'onbeforeeditfocus', 'onbeforepaste', 'onbeforeprint', 'onbeforeunload', 'onbeforeupdate', 'onblur', 'onbounce', 'oncellchange', 'onchange', 'onclick', 'oncontextmenu', 'oncontrolselect', 'oncopy', 'oncut', 'ondataavailable', 'ondatasetchanged', 'ondatasetcomplete', 'ondblclick', 'ondeactivate', 'ondrag', 'ondragend', 'ondragenter', 'ondragleave', 'ondragover', 'ondragstart', 'ondrop', 'onerror', 'onerrorupdate', 'onfilterchange', 'onfinish', 'onfocus', 'onfocusin', 'onfocusout', 'onhelp', 'onkeydown', 'onkeypress', 'onkeyup', 'onlayoutcomplete', 'onload', 'onlosecapture', 'onmousedown', 'onmouseenter', 'onmouseleave', 'onmousemove', 'onmouseout', 'onmouseover', 'onmouseup', 'onmousewheel', 'onmove', 'onmoveend', 'onmovestart', 'onpaste', 'onpropertychange', 'onreadystatechange', 'onreset', 'onresize', 'onresizeend', 'onresizestart', 'onrowenter', 'onrowexit', 'onrowsdelete', 'onrowsinserted', 'onscroll', 'onselect', 'onselectionchange', 'onselectstart', 'onstart', 'onstop', 'onsubmit', 'onunload', 'confirm', 'eval', 'document');
+    $ra = array_merge($ra1, $ra2);
+
+    $found = true; // keep replacing as long as the previous round replaced something
+    while ($found == true) {
+        $val_before = $val;
+        for ($i = 0; $i < sizeof($ra); $i++) {
+            $pattern = '/';
+            for ($j = 0; $j < strlen($ra[$i]); $j++) {
+                if ($j > 0) {
+                    $pattern .= '(';
+                    $pattern .= '(&#[x|X]0{0,8}([9][a][b]);?)?';
+                    $pattern .= '|(&#0{0,8}([9][10][13]);?)?';
+                    $pattern .= ')?';
+                }
+                $pattern .= $ra[$i][$j];
+            }
+            $pattern .= '/i';
+            $replacement = substr($ra[$i], 0, 2) . '<x>' . substr($ra[$i], 2); // add in <> to nerf the tag
+            $val = preg_replace($pattern, $replacement, $val); // filter out the hex tags
+            if ($val_before == $val) {
+                // no replacements were made, so exit the loop
+                $found = false;
+            }
+        }
+    }
+
+    // 直接剔除特殊字符
+    $_arr_dangerChars = ["&", "|", ";", "$", "+", "\t", "\r", "\n", ",", PHP_EOL];
+    foreach ($_arr_dangerChars as $_value) {
+        $val = str_ireplace($_value, '', $val);
+    }
+
+    // 正则过滤
+    $_arr_dangerRegs = [
+        // html属性包含脚本
+        "/\w+\s*=\s*(\"|')?(java|vb)script:\S*(\"|')?/i",
+        // js 对象
+        "/(document|location)\s*\.\s*\S*/i",
+        // js 函数
+        "/(eval|alert|prompt|msgbox)\s*\(.*\)/i",
+        // css
+        "/expression\s*:\s*\S*/i",
+        // 过滤 Sql 注入
+        "/show\s+(databases|tables|index|columns)/i",
+        "/create\s+(database|table|(unique\s+)?index|view|procedure|proc)/i",
+        "/alter\s+(database|table)/i",
+        "/drop\s+(database|table|index|view|column)/i",
+        "/backup\s+(database|log)/i",
+        "/truncate\s+table/i",
+        "/replace\s+view/i",
+        "/(add|change)\s+column/i",
+        "/insert\s+into/i",
+        "/load_file\s*\(.*\)/i",
+        "/(outfile|infile)\s+(\"|')?\S*(\"|')/i",
+    ];
+    foreach ($_arr_dangerRegs as $_value) {
+        $val = preg_replace($_value, '', $val);
+    }
+    $val = htmlentities($val, ENT_QUOTES, "UTF-8", true);
+    return $val;
+}
+
+/**
+ * 对象转数组
+ */
+function object_to_array($object)
+{
+
+    if (is_object($object)) {
+        $array = [];
+        foreach ($object as $key => $value) {
+            $array[$key] = $value;
+        }
+    } else {
+        $array = $object;
+    }
+    return $array;
+}
+?>
